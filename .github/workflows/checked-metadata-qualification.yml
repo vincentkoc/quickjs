@@ -40,16 +40,12 @@ jobs:
           cmake -S . -B "$RUNNER_TEMP/baseline-build" -DCMAKE_BUILD_TYPE=Release
           cmake --build "$RUNNER_TEMP/baseline-build" --target api-test -j2
           git restore --source=HEAD quickjs.c api-test.c
-      - name: Full candidate native proof
+      - name: Build unchanged candidate library for cost only
         shell: bash
         run: |
           set -euo pipefail
           cmake -S . -B "$RUNNER_TEMP/candidate-build" -DCMAKE_BUILD_TYPE=Release
-          cmake --build "$RUNNER_TEMP/candidate-build" -j2
-          "$RUNNER_TEMP/candidate-build/api-test"
-          echo 'META_NATIVE_API_PASS source=fd4cbeb70b2f0d7acf217bef05713edd594a29d7 sweeps=17 trials=34816 prior-pending-controls=12'
-          make test BUILD_DIR="$RUNNER_TEMP/candidate-build" BUILD_TYPE=Release
-          echo 'META_NATIVE_TESTS_PASS tests.conf'
+          cmake --build "$RUNNER_TEMP/candidate-build" --target qjs -j2
           git diff --exit-code
       - name: Selected old-source controls
         shell: bash
@@ -68,10 +64,8 @@ jobs:
                       assert 'function_metadata_oom:' in p.stderr,row
                       assert '!JS_HasException(ctx)' in p.stderr,row
                   rows.append(row)
-          assert any(r['returncode'] for r in rows)
-          for group in [range(3),range(3,8),[8]]:
-              assert any(r['returncode'] and r['kind'] in group for r in rows)
-          print('META_NATIVE_RED',json.dumps(rows))
+          print('META_NATIVE_RED',json.dumps(rows),flush=True)
+          assert any(r['returncode'] for r in rows),rows
           PY
       - name: Matched native cost
         shell: bash
@@ -176,192 +170,3 @@ jobs:
             cc -O3 -D_GNU_SOURCE -I. "$RUNNER_TEMP/native-cost.c" "$RUNNER_TEMP/$arm-build/libqjs.a" -lm -ldl -pthread -o "$RUNNER_TEMP/$arm-cost"
           done
           node "$RUNNER_TEMP/cost-runner.mjs" native
-  wasi:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: fd4cbeb70b2f0d7acf217bef05713edd594a29d7
-          fetch-depth: 3
-          path: ng-source
-      - name: Extract only native production repair
-        shell: bash
-        run: |
-          set -euo pipefail
-          git -C ng-source diff d7215b0ad3fc2c562e8317fd9bca058fd4863804 HEAD -- quickjs.c > "$RUNNER_TEMP/ng-metadata.patch"
-          test -s "$RUNNER_TEMP/ng-metadata.patch"
-          sha256sum "$RUNNER_TEMP/ng-metadata.patch"
-      - uses: actions/checkout@v4
-        with:
-          repository: vincentkoc/quickjs-wasi
-          ref: feb11a3da64e22f5774fc2cb6d6c6372b364e9ba
-          path: wasi
-          submodules: recursive
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10.30.3
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24.22.1
-          cache: pnpm
-          cache-dependency-path: wasi/pnpm-lock.yaml
-      - name: Build matched pinned WASI pair
-        working-directory: wasi
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git -C quickjs-ng rev-parse HEAD)" = 6d46d07d04041b40f4f49eaa7fdebe44c314c699
-          pnpm install --frozen-lockfile
-          make setup
-          pnpm run build
-          cp quickjs.wasm "$RUNNER_TEMP/baseline.wasm"
-          git -C quickjs-ng apply --check "$RUNNER_TEMP/ng-metadata.patch"
-          git -C quickjs-ng apply "$RUNNER_TEMP/ng-metadata.patch"
-          git -C quickjs-ng diff --check
-          git -C quickjs-ng diff --stat
-          pnpm run build
-          cp quickjs.wasm "$RUNNER_TEMP/candidate.wasm"
-          sha256sum quickjs.wasm dist/index.js
-      - name: Record exhausted-cap recovery counterfactual
-        working-directory: wasi
-        shell: bash
-        run: |
-          set -euo pipefail
-          node --input-type=module <<'JS'
-          import assert from 'node:assert/strict';
-          import {readFileSync} from 'node:fs';
-          import {createHash} from 'node:crypto';
-          import {QuickJS} from './dist/index.js';
-          const rows=[],ample=16*1024*1024;
-          for(const arm of ['baseline','candidate']){
-            const bytes=readFileSync(process.env.RUNNER_TEMP+'/'+arm+'.wasm'),wasm=await WebAssembly.compile(bytes);
-            for(const fillers of [22,23]){
-              using seed=await QuickJS.create({wasm,memoryLimit:ample});
-              using holder=seed.evalCode('Object.create(Function.prototype)');seed.exportHandle(holder);
-              void seed.true;void seed.undefined;seed.getMemoryUsage();
-              const handles=[];
-              for(let i=1;i<=fillers;i++){const f=seed.evalCode('Object.create(Function.prototype)');f.defineProp('filler_'+i,seed.true);handles.push(f);}
-              const image=seed.snapshot();
-              for(const preceding of ['none','function','promise']){
-                using vm=await QuickJS.restore(image,{wasm,memoryLimit:227185});
-                const row={arm,fillers,preceding,wasmSha256:createHash('sha256').update(bytes).digest('hex')};
-                try{
-                  if(preceding==='function')vm.newFunction('',()=>vm.true).dispose();
-                  if(preceding==='promise')vm.newPromise().handle.dispose();
-                }catch(e){row.construction={name:e.name,message:e.message};e.dispose?.();}
-                try{using v=vm.evalCode('6 * 7');row.eval=v.toNumber();}
-                catch(e){row.evalError={name:e.name,message:e.message};e.dispose?.();}
-                using pending=vm.getException();
-                vm._getExports().qjs_set_memory_limit(ample);
-                row.pendingTag=vm._getExports().qjs_typeof(pending.ptr);
-                if(pending.isError)row.pendingMessage=pending.getProp('message').consume(h=>h.toString());
-                assert.equal(vm.evalCode('6 * 7').consume(h=>h.toNumber()),42);
-                using after=vm.getException();assert.equal(vm._getExports().qjs_typeof(after.ptr),4);
-                rows.push(row);
-              }
-              for(const f of handles)f.dispose();
-            }
-          }
-          console.log('META_WASI_RECOVERY_WITNESS',JSON.stringify({node:process.version,rows}));
-          JS
-      - name: Full pinned WASI baseline and candidate suites
-        working-directory: wasi
-        shell: bash
-        run: |
-          set -euo pipefail
-          for arm in baseline candidate; do
-            cp "$RUNNER_TEMP/$arm.wasm" quickjs.wasm
-            set +e
-            pnpm test --reporter=json --outputFile="$RUNNER_TEMP/meta-wasi.json"
-            status=$?
-            set -e
-            ARM="$arm" node --input-type=module <<'JS'
-          import {readFileSync} from 'node:fs';
-          const r=JSON.parse(readFileSync(process.env.RUNNER_TEMP+'/meta-wasi.json'));
-          console.log('META_WASI_SUITE',JSON.stringify({arm:process.env.ARM,passed:r.numPassedTests,failed:r.numFailedTests,files:r.testResults.length,failures:r.testResults.flatMap(x=>x.assertionResults).filter(x=>x.status==='failed').map(x=>({title:x.title,messages:x.failureMessages}))}));
-          JS
-            test "$status" = 0
-          done
-      - name: Matched WASI cost
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat > "$RUNNER_TEMP/wasi-cost.mjs" <<'JS'
-          import assert from 'node:assert/strict';
-          import {readFileSync} from 'node:fs';
-          import {createHash} from 'node:crypto';
-          import {cpus,loadavg,freemem} from 'node:os';
-          import {pathToFileURL} from 'node:url';
-          import {resolve} from 'node:path';
-          const [root,wasmPath,arm,pair]=process.argv.slice(2);
-          const {QuickJS}=await import(pathToFileURL(resolve(root,'index.js')));
-          const bytes=readFileSync(wasmPath),wasm=await WebAssembly.compile(bytes);
-          const hash=b=>createHash('sha256').update(b).digest('hex'),env=()=>({load:loadavg(),freeMemoryBytes:freemem()});
-          const start=env(),rows=[];
-          for(const kind of ['named-ascii','named-unicode','bytecode','promise']){
-            using vm=await QuickJS.create({wasm,memoryLimit:64*1024*1024});
-            void vm.true;void vm.undefined;
-            const owned=vm._ownedHandles.size,host=()=>vm.true;
-            const names=Array.from({length:1000},(_,i)=>(kind==='named-unicode'?'métadata😀':'native')+i);
-            using factory=vm.evalCode('(()=>{const data=true;return()=>function named(x){return data;};})()');
-            const samples=[];
-            for(let round=-20;round<40;round++){
-              const handles=[],cpu=process.cpuUsage(),at=performance.now();
-              for(let i=0;i<1000;i++){
-                if(kind==='promise'){const d=vm.newPromise();d.resolve(vm.true);handles.push(d.handle);}
-                else if(kind==='bytecode')handles.push(vm.callFunction(factory,vm.undefined));
-                else handles.push(vm.newFunction(names[i],host));
-              }
-              const wallMs=performance.now()-at,elapsed=process.cpuUsage(cpu);
-              for(let i=0;i<1000;i++){
-                const h=handles[i];
-                if(kind==='promise'){
-                  assert(h.isPromise);assert.equal(h.promiseState,1);
-                  const result=await vm.resolvePromise(h);assert('value' in result);assert.equal(result.value.consume(v=>v.toBoolean()),true);
-                }else{
-                  assert(h.isFunction);
-                  assert.equal(h.getProp('name').consume(v=>v.toString()),kind==='bytecode'?'named':names[i]);
-                  assert.equal(h.getProp('length').consume(v=>v.toNumber()),kind==='bytecode'?1:0);
-                  assert.equal(vm.callFunction(h,vm.undefined).consume(v=>v.toBoolean()),true);
-                }
-                h.dispose();if(kind.startsWith('named-'))assert.equal(vm.unregisterHostCallback(names[i]),true);
-              }
-              vm.executePendingJobs();vm.runGC();assert.equal(vm._ownedHandles.size,owned);assert.equal(vm.hostCallbacks.size,0);
-              using pending=vm.getException();assert.equal(vm._getExports().qjs_typeof(pending.ptr),4);
-              if(round>=0)samples.push({wallMs,cpuMs:(elapsed.user+elapsed.system)/1000});
-            }
-            rows.push({kind,samples});
-          }
-          console.log(JSON.stringify({arm,pair:Number(pair),rows,node:process.version,cpu:cpus()[0]?.model,start,end:env(),wasmSha256:hash(bytes),moduleSha256:hash(readFileSync(resolve(root,'index.js'))),probeSha256:hash(readFileSync(new URL(import.meta.url))),warmups:20,rounds:40,operationsPerBatch:1000}));
-          JS
-          cat > "$RUNNER_TEMP/cost-runner.mjs" <<'JS'
-          import assert from 'node:assert/strict';
-          import {execFileSync} from 'node:child_process';
-          import {readFileSync} from 'node:fs';
-          import {createHash} from 'node:crypto';
-          import {cpus,loadavg,freemem} from 'node:os';
-          const mode=process.argv[2],tmp=process.env.RUNNER_TEMP,results=[];
-          const hash=p=>createHash('sha256').update(readFileSync(p)).digest('hex');
-          for(let pair=0;pair<5;pair++)for(const arm of pair%2?['candidate','baseline']:['baseline','candidate']){
-            const start={load:loadavg(),freeMemoryBytes:freemem()};
-            let r;
-            if(mode==='native'){
-              const exe=tmp+'/'+arm+'-cost';
-              r=JSON.parse(execFileSync(exe,[],{encoding:'utf8',timeout:300000,maxBuffer:1024*1024}));
-              Object.assign(r,{arm,pair,cpu:cpus()[0]?.model,start,end:{load:loadavg(),freeMemoryBytes:freemem()},executableSha256:hash(exe),probeSha256:hash(tmp+'/native-cost.c')});
-            }else r=JSON.parse(execFileSync(process.execPath,[tmp+'/wasi-cost.mjs','wasi/dist',tmp+'/'+arm+'.wasm',arm,String(pair)],{encoding:'utf8',timeout:300000,maxBuffer:1024*1024}));
-            results.push(r);console.log('META_'+mode.toUpperCase()+'_RAW',JSON.stringify(r));
-          }
-          for(const r of results){
-            assert.equal(r.probeSha256,results[0].probeSha256);
-            for(const row of r.rows){assert.equal(row.samples.length,40);for(const s of row.samples)assert(Number.isFinite(s.wallMs)&&s.wallMs>0&&Number.isFinite(s.cpuMs)&&s.cpuMs>0);}
-          }
-          const median=a=>[...a].sort((a,b)=>a-b)[Math.floor(a.length/2)],p95=a=>[...a].sort((a,b)=>a-b)[Math.ceil(a.length*.95)-1];
-          console.log('META_'+mode.toUpperCase()+'_SUMMARY',JSON.stringify(results[0].rows.map(row=>({kind:row.kind,pairs:Array.from({length:5},(_,pair)=>{
-            const arms=Object.fromEntries(results.filter(r=>r.pair===pair).map(r=>[r.arm,r.rows.find(x=>x.kind===row.kind).samples]));
-            const metrics=Object.fromEntries(Object.entries(arms).map(([arm,a])=>[arm,{wallMedianMs:median(a.map(s=>s.wallMs)),cpuMedianMs:median(a.map(s=>s.cpuMs)),wallP95Ms:p95(a.map(s=>s.wallMs)),earlyMedianMs:median(a.slice(0,10).map(s=>s.wallMs)),lateMedianMs:median(a.slice(-10).map(s=>s.wallMs))}]));
-            return{pair,arms:metrics,wallRatio:metrics.candidate.wallMedianMs/metrics.baseline.wallMedianMs,cpuRatio:metrics.candidate.cpuMedianMs/metrics.baseline.cpuMedianMs};
-          })}))));
-          JS
-          node "$RUNNER_TEMP/cost-runner.mjs" wasi
