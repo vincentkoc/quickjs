@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: f7c17f37c6abf55911341f0829b525eca298d7b2
+          ref: fd4cbeb70b2f0d7acf217bef05713edd594a29d7
           fetch-depth: 2
       - uses: actions/setup-node@v4
         with:
@@ -47,7 +47,7 @@ jobs:
           cmake -S . -B "$RUNNER_TEMP/candidate-build" -DCMAKE_BUILD_TYPE=Release
           cmake --build "$RUNNER_TEMP/candidate-build" -j2
           "$RUNNER_TEMP/candidate-build/api-test"
-          echo 'META_NATIVE_API_PASS source=f7c17f37c6abf55911341f0829b525eca298d7b2 sweeps=17 trials=34816 prior-pending-controls=12'
+          echo 'META_NATIVE_API_PASS source=fd4cbeb70b2f0d7acf217bef05713edd594a29d7 sweeps=17 trials=34816 prior-pending-controls=12'
           make test BUILD_DIR="$RUNNER_TEMP/candidate-build" BUILD_TYPE=Release
           echo 'META_NATIVE_TESTS_PASS tests.conf'
           git diff --exit-code
@@ -185,7 +185,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: f7c17f37c6abf55911341f0829b525eca298d7b2
+          ref: fd4cbeb70b2f0d7acf217bef05713edd594a29d7
       - name: Complete ASan and UBSan native proof
         shell: bash
         run: |
@@ -202,7 +202,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: f7c17f37c6abf55911341f0829b525eca298d7b2
+          ref: fd4cbeb70b2f0d7acf217bef05713edd594a29d7
           fetch-depth: 2
           path: ng-source
       - name: Extract only native production repair
@@ -215,7 +215,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: vincentkoc/quickjs-wasi
-          ref: 4f1a33ea45081a126dd6e64c23dfe7309b5a88b8
+          ref: feb11a3da64e22f5774fc2cb6d6c6372b364e9ba
           path: wasi
           submodules: recursive
       - uses: pnpm/action-setup@v4
@@ -243,20 +243,66 @@ jobs:
           pnpm run build
           cp quickjs.wasm "$RUNNER_TEMP/candidate.wasm"
           sha256sum quickjs.wasm dist/index.js
-      - name: Full pinned WASI candidate suite
+      - name: Record exhausted-cap recovery counterfactual
         working-directory: wasi
         shell: bash
         run: |
-          set +e
-          pnpm test --reporter=json --outputFile="$RUNNER_TEMP/meta-wasi.json"
-          status=$?
-          set -e
+          set -euo pipefail
           node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import {readFileSync} from 'node:fs';
+          import {createHash} from 'node:crypto';
+          import {QuickJS} from './dist/index.js';
+          const rows=[],ample=16*1024*1024;
+          for(const arm of ['baseline','candidate']){
+            const bytes=readFileSync(process.env.RUNNER_TEMP+'/'+arm+'.wasm'),wasm=await WebAssembly.compile(bytes);
+            for(const fillers of [22,23]){
+              using seed=await QuickJS.create({wasm,memoryLimit:ample});
+              using holder=seed.evalCode('Object.create(Function.prototype)');seed.exportHandle(holder);
+              void seed.true;void seed.undefined;seed.getMemoryUsage();
+              const handles=[];
+              for(let i=1;i<=fillers;i++){const f=seed.evalCode('Object.create(Function.prototype)');f.defineProp('filler_'+i,seed.true);handles.push(f);}
+              const image=seed.snapshot();
+              for(const preceding of ['none','function','promise']){
+                using vm=await QuickJS.restore(image,{wasm,memoryLimit:227185});
+                const row={arm,fillers,preceding,wasmSha256:createHash('sha256').update(bytes).digest('hex')};
+                try{
+                  if(preceding==='function')vm.newFunction('',()=>vm.true).dispose();
+                  if(preceding==='promise')vm.newPromise().handle.dispose();
+                }catch(e){row.construction={name:e.name,message:e.message};e.dispose?.();}
+                try{using v=vm.evalCode('6 * 7');row.eval=v.toNumber();}
+                catch(e){row.evalError={name:e.name,message:e.message};e.dispose?.();}
+                using pending=vm.getException();
+                vm._getExports().qjs_set_memory_limit(ample);
+                row.pendingTag=vm._getExports().qjs_typeof(pending.ptr);
+                if(pending.isError)row.pendingMessage=pending.getProp('message').consume(h=>h.toString());
+                assert.equal(vm.evalCode('6 * 7').consume(h=>h.toNumber()),42);
+                using after=vm.getException();assert.equal(vm._getExports().qjs_typeof(after.ptr),4);
+                rows.push(row);
+              }
+              for(const f of handles)f.dispose();
+            }
+          }
+          console.log('META_WASI_RECOVERY_WITNESS',JSON.stringify({node:process.version,rows}));
+          JS
+      - name: Full pinned WASI baseline and candidate suites
+        working-directory: wasi
+        shell: bash
+        run: |
+          set -euo pipefail
+          for arm in baseline candidate; do
+            cp "$RUNNER_TEMP/$arm.wasm" quickjs.wasm
+            set +e
+            pnpm test --reporter=json --outputFile="$RUNNER_TEMP/meta-wasi.json"
+            status=$?
+            set -e
+            ARM="$arm" node --input-type=module <<'JS'
           import {readFileSync} from 'node:fs';
           const r=JSON.parse(readFileSync(process.env.RUNNER_TEMP+'/meta-wasi.json'));
-          console.log('META_WASI_SUITE',JSON.stringify({passed:r.numPassedTests,failed:r.numFailedTests,files:r.testResults.length,failures:r.testResults.flatMap(x=>x.assertionResults).filter(x=>x.status==='failed').map(x=>({title:x.title,messages:x.failureMessages}))}));
+          console.log('META_WASI_SUITE',JSON.stringify({arm:process.env.ARM,passed:r.numPassedTests,failed:r.numFailedTests,files:r.testResults.length,failures:r.testResults.flatMap(x=>x.assertionResults).filter(x=>x.status==='failed').map(x=>({title:x.title,messages:x.failureMessages}))}));
           JS
-          exit "$status"
+            test "$status" = 0
+          done
       - name: Matched WASI cost
         shell: bash
         run: |
