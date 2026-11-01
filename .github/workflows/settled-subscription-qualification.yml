@@ -1,0 +1,65 @@
+{
+  "name": "Settled Promise subscription qualification",
+  "on": {
+    "push": {
+      "branches": [
+        "ci/settled-promise-subscription"
+      ]
+    }
+  },
+  "permissions": {
+    "contents": "read"
+  },
+  "jobs": {
+    "native": {
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 20,
+      "steps": [
+        {
+          "uses": "actions/checkout@v4",
+          "with": {
+            "ref": "d3c90857ccba4c47b39d023280726efa276e3098",
+            "fetch-depth": 8
+          }
+        },
+        {
+          "name": "Build frozen parent control",
+          "shell": "bash",
+          "run": "set -euo pipefail\ngit show 71f3c615d6f44379583a2bffef90c0c66ec0b3dd:quickjs.c > quickjs.c\npython3 <<'PY'\nfrom pathlib import Path\np=Path('api-test.c');s=p.read_text()\ns=s[:s.index('int main(void)')]+'''int main(int argc, char **argv)\n{\n    assert(argc == 3);\n    promise_subscription_oom(atoi(argv[1]), atoi(argv[2]));\n    return 0;\n}\n'''\np.write_text(s)\nPY\ncmake -S . -B \"$RUNNER_TEMP/baseline-build\" -DCMAKE_BUILD_TYPE=Release\ncmake --build \"$RUNNER_TEMP/baseline-build\" --target api-test -j2\ngit restore --source=HEAD quickjs.c api-test.c"
+        },
+        {
+          "name": "Release API sweeps and existing tests",
+          "shell": "bash",
+          "run": "set -euo pipefail\ncmake -S . -B \"$RUNNER_TEMP/candidate-build\" -DCMAKE_BUILD_TYPE=Release\ncmake --build \"$RUNNER_TEMP/candidate-build\" -j2\n\"$RUNNER_TEMP/candidate-build/api-test\"\n\"$RUNNER_TEMP/candidate-build/run-test262\" -c tests.conf\ngit diff --exit-code\necho 'SUB_NATIVE_PASS source=d3c90857ccba4c47b39d023280726efa276e3098 new-sweeps=8 new-trials=16384 prior-pending=24 fifo-controls=2'"
+        },
+        {
+          "name": "Old-source differential controls",
+          "shell": "bash",
+          "run": "set -euo pipefail\nulimit -c 0\npython3 <<'PY'\nimport subprocess,os,json,signal\nrows=[]\nfor guest in range(2):\n    for state in range(4):\n        p=subprocess.run([os.environ['RUNNER_TEMP']+'/baseline-build/api-test',str(guest),str(state)],capture_output=True,text=True,timeout=180)\n        rows.append({'guest':guest,'state':state,'returncode':p.returncode,'stderr':p.stderr[-1800:]})\nprint('SUB_NATIVE_RED',json.dumps(rows),flush=True)\nfor row in rows:\n    if row['state']==0:assert row['returncode']==0,row\n    else:\n        assert row['returncode']==-signal.SIGABRT,row\n        assert 'promise_subscription:' in row['stderr'],row\n        assert '!JS_HasException(ctx)' in row['stderr'],row\nPY"
+        }
+      ]
+    },
+    "sanitizers": {
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 20,
+      "env": {
+        "ASAN_OPTIONS": "halt_on_error=1",
+        "UBSAN_OPTIONS": "halt_on_error=1"
+      },
+      "steps": [
+        {
+          "uses": "actions/checkout@v4",
+          "with": {
+            "ref": "d3c90857ccba4c47b39d023280726efa276e3098",
+            "fetch-depth": 8
+          }
+        },
+        {
+          "name": "ASan and UBSan native proof",
+          "shell": "bash",
+          "run": "set -euo pipefail\ncmake -S . -B \"$RUNNER_TEMP/build\" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DQJS_ENABLE_ASAN=ON -DQJS_ENABLE_UBSAN=ON\ncmake --build \"$RUNNER_TEMP/build\" -j2\n\"$RUNNER_TEMP/build/api-test\"\n\"$RUNNER_TEMP/build/run-test262\" -c tests.conf\ngit diff --exit-code\necho 'SUB_SANITIZED_PASS source=d3c90857ccba4c47b39d023280726efa276e3098'"
+        }
+      ]
+    }
+  }
+}
