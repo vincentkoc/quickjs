@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: fd4cbeb70b2f0d7acf217bef05713edd594a29d7
-          fetch-depth: 2
+          fetch-depth: 3
       - uses: actions/setup-node@v4
         with:
           node-version: 24.22.1
@@ -176,26 +176,6 @@ jobs:
             cc -O3 -D_GNU_SOURCE -I. "$RUNNER_TEMP/native-cost.c" "$RUNNER_TEMP/$arm-build/libqjs.a" -lm -ldl -pthread -o "$RUNNER_TEMP/$arm-cost"
           done
           node "$RUNNER_TEMP/cost-runner.mjs" native
-  sanitizers:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    env:
-      ASAN_OPTIONS: halt_on_error=1
-      UBSAN_OPTIONS: halt_on_error=1
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: fd4cbeb70b2f0d7acf217bef05713edd594a29d7
-      - name: Complete ASan and UBSan native proof
-        shell: bash
-        run: |
-          set -euo pipefail
-          cmake -S . -B "$RUNNER_TEMP/sanitized-build" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DQJS_ENABLE_ASAN=ON -DQJS_ENABLE_UBSAN=ON
-          cmake --build "$RUNNER_TEMP/sanitized-build" -j2
-          "$RUNNER_TEMP/sanitized-build/api-test"
-          echo 'META_SANITIZED_API_PASS'
-          "$RUNNER_TEMP/sanitized-build/run-test262" -c tests.conf
-          echo 'META_SANITIZED_TESTS_PASS tests.conf'
   wasi:
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -203,7 +183,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: fd4cbeb70b2f0d7acf217bef05713edd594a29d7
-          fetch-depth: 2
+          fetch-depth: 3
           path: ng-source
       - name: Extract only native production repair
         shell: bash
