@@ -48,7 +48,7 @@
         {
           "uses": "actions/checkout@v4",
           "with": {
-            "ref": "9dd7327",
+            "ref": "bb8de0fa44cbbc124fabb55172da1f82810cb24a",
             "fetch-depth": 16,
             "path": "ng-source"
           }
@@ -56,7 +56,7 @@
         {
           "name": "Extract only native production layers",
           "shell": "bash",
-          "run": "set -euo pipefail\ngit -C ng-source diff d7215b0ad3fc2c562e8317fd9bca058fd4863804 678c0404f70613129059bd17d1c847ab9b5c2590 -- quickjs.c > \"$RUNNER_TEMP/parent.patch\"\ngit -C ng-source diff 678c0404f70613129059bd17d1c847ab9b5c2590 9dd7327 -- quickjs.c > \"$RUNNER_TEMP/reserved.patch\"\nsha256sum \"$RUNNER_TEMP/\"*.patch\n"
+          "run": "set -euo pipefail\ngit -C ng-source diff d7215b0ad3fc2c562e8317fd9bca058fd4863804 678c0404f70613129059bd17d1c847ab9b5c2590 -- quickjs.c > \"$RUNNER_TEMP/parent.patch\"\ngit -C ng-source diff 678c0404f70613129059bd17d1c847ab9b5c2590 bb8de0fa44cbbc124fabb55172da1f82810cb24a -- quickjs.c > \"$RUNNER_TEMP/reserved.patch\"\nsha256sum \"$RUNNER_TEMP/\"*.patch\n"
         },
         {
           "uses": "actions/checkout@v4",
