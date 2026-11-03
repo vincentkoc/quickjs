@@ -1,5 +1,5 @@
 {
-  "name": "Identify native generator allocator phases",
+  "name": "Final async-generator delivery and matched cost qualification",
   "on": {
     "workflow_dispatch": {}
   },
@@ -14,14 +14,115 @@
         {
           "uses": "actions/checkout@v4",
           "with": {
-            "ref": "7d33e583548e28cce1bc884e524f03d04911028b",
+            "ref": "58a02a329b61549586d624bb639270f2f533dc68",
             "fetch-depth": 16
           }
         },
         {
           "name": "Release and parent failure controls",
           "shell": "bash",
-          "run": "set -euo pipefail\npython3 <<'CONTROL'\nfrom pathlib import Path\np=Path('api-test.c');s=p.read_text();s=s[:s.index('int main(void)')]+'int main(int argc,char **argv) { if(argc>1){generator_delivery_controls(); return 0;} for (int mode=0;mode<9;mode++) for(int room=-1;room<=0;room++){ fprintf(stderr,\"PHASE mode=%d room=%d\\\\n\",mode,room); int failed=generator_delivery_trial(mode,room); fprintf(stderr,\"RESULT mode=%d room=%d failed=%d\\\\n\",mode,room,failed); } return 0; }\\n';p.write_text(s)\nCONTROL\ncmake -S . -B \"$RUNNER_TEMP/candidate\" -DCMAKE_BUILD_TYPE=Release\ncmake --build \"$RUNNER_TEMP/candidate\" --target api-test -j2\n\"$RUNNER_TEMP/candidate/api-test\"\n\nset +e\n\"$RUNNER_TEMP/candidate/api-test\" controls\nrc=$?\nset -e\necho CANDIDATE_CONTROLS_EXIT=$rc\ngit show fc8e21a7bfa76182639fbe4667864c6cf1c89499:quickjs.c > quickjs.c\ncmake -S . -B \"$RUNNER_TEMP/baseline\" -DCMAKE_BUILD_TYPE=Release\ncmake --build \"$RUNNER_TEMP/baseline\" --target api-test -j2\nset +e\n\"$RUNNER_TEMP/baseline/api-test\" controls\nrc=$?\nset -e\necho BASELINE_CONTROLS_EXIT=$rc\n"
+          "run": "set -euo pipefail\ncmake -S . -B \"$RUNNER_TEMP/candidate\" -DCMAKE_BUILD_TYPE=Release\ncmake --build \"$RUNNER_TEMP/candidate\" -j2\n\"$RUNNER_TEMP/candidate/api-test\"\n\"$RUNNER_TEMP/candidate/run-test262\" -c tests.conf\necho GENERATOR_RELEASE_PASS\npython3 <<'CONTROL'\nfrom pathlib import Path\np=Path('api-test.c');s=p.read_text();s=s[:s.index('int main(void)')]+'int main(int argc,char **argv) { assert(argc==3); generator_delivery_trial(atoi(argv[1]),atoi(argv[2])); return 0; }\\n';p.write_text(s)\nCONTROL\ngit show fc8e21a7bfa76182639fbe4667864c6cf1c89499:quickjs.c > quickjs.c\ncmake -S . -B \"$RUNNER_TEMP/baseline\" -DCMAKE_BUILD_TYPE=Release\ncmake --build \"$RUNNER_TEMP/baseline\" --target api-test -j2\nulimit -c 0\npython3 <<'CONTROL'\nimport subprocess,os,json,signal\nrows=[]\nfor mode in range(9):\n for headroom in [0,-1]:\n  p=subprocess.run([os.environ['RUNNER_TEMP']+'/baseline/api-test',str(mode),str(headroom)],capture_output=True,text=True,timeout=120)\n  row={'mode':mode,'headroom':headroom,'exit':p.returncode,'stderr':p.stderr[-500:]};rows.append(row)\n  assert p.returncode==(-signal.SIGABRT if headroom==0 else 0),row\nprint('GENERATOR_OLD_CONTROLS',json.dumps(rows))\nCONTROL\n\necho GENERATOR_NATIVE_FINAL_DONE\n"
+        }
+      ]
+    },
+    "sanitizers": {
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 20,
+      "env": {
+        "ASAN_OPTIONS": "halt_on_error=1",
+        "UBSAN_OPTIONS": "halt_on_error=1"
+      },
+      "steps": [
+        {
+          "uses": "actions/checkout@v4",
+          "with": {
+            "ref": "58a02a329b61549586d624bb639270f2f533dc68",
+            "fetch-depth": 16
+          }
+        },
+        {
+          "name": "ASan UBSan allocation and regression tests",
+          "shell": "bash",
+          "run": "set -euo pipefail\ncmake -S . -B \"$RUNNER_TEMP/build\" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DQJS_ENABLE_ASAN=ON -DQJS_ENABLE_UBSAN=ON\ncmake --build \"$RUNNER_TEMP/build\" -j2\n\"$RUNNER_TEMP/build/api-test\"\n\"$RUNNER_TEMP/build/run-test262\" -c tests.conf\necho GENERATOR_SANITIZED_PASS\n"
+        }
+      ]
+    },
+    "native-cost": {
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 25,
+      "steps": [
+        {
+          "uses": "actions/checkout@v4",
+          "with": {
+            "ref": "58a02a329b61549586d624bb639270f2f533dc68",
+            "fetch-depth": 16
+          }
+        },
+        {
+          "name": "Five paired native lifecycle costs",
+          "shell": "bash",
+          "run": "set -euo pipefail\ncat > \"$RUNNER_TEMP/native-cost.c\" <<'COST'\n#ifdef NDEBUG\n#undef NDEBUG\n#endif\n#include <assert.h>\n#include <stdio.h>\n#include <string.h>\n#include <time.h>\n#include <sys/resource.h>\n#include \"quickjs.h\"\nstatic double now(clockid_t id){struct timespec t;assert(!clock_gettime(id,&t));return t.tv_sec*1000.0+t.tv_nsec/1e6;}\nint main(void){const int N=1000,W=200,T=80;const char *names[]={\"completed-next\",\"yield\",\"await-return\",\"completed-return\",\"promise-control\"},*sources[]={\"(n)=>{globalThis.seen=0;globalThis.good=0;for(let i=0;i<n;i++)(async function*(){})().next().then(r=>{seen++;good+=r.done===true&&r.value===undefined})}\",\"(n)=>{globalThis.seen=0;globalThis.good=0;for(let i=0;i<n;i++)(async function*(){yield 1})().next().then(r=>{seen++;good+=r.done===false&&r.value===1})}\",\"(n)=>{globalThis.seen=0;globalThis.good=0;for(let i=0;i<n;i++)(async function*(){await 0})().next().then(r=>{seen++;good+=r.done===true&&r.value===undefined})}\",\"(n)=>{globalThis.seen=0;globalThis.good=0;for(let i=0;i<n;i++)(async function*(){})().return(1).then(r=>{seen++;good+=r.done===true&&r.value===1})}\",\"(n)=>{globalThis.seen=0;globalThis.good=0;for(let i=0;i<n;i++)Promise.resolve(1).then(r=>{seen++;good+=r===1})}\"};printf(\"{\\\"n\\\":%d,\\\"warm\\\":%d,\\\"timed\\\":%d,\\\"rows\\\":[\",N,W,T);\nfor(int k=0;k<5;k++){JSRuntime*rt=JS_NewRuntime();assert(rt);JS_SetDumpFlags(rt,JS_ABORT_ON_LEAKS);JSContext*ctx=JS_NewContext(rt),*jobctx;assert(ctx);JSValue fn=JS_Eval(ctx,sources[k],strlen(sources[k]),\"<cost>\",0),n=JS_NewInt32(ctx,N);assert(!JS_IsException(fn));int expected=-1;printf(\"%s{\\\"kind\\\":\\\"%s\\\",\\\"samples\\\":[\",k?\",\":\"\",names[k]);for(int r=-W;r<T;r++){double c=now(CLOCK_PROCESS_CPUTIME_ID),t=now(CLOCK_MONOTONIC);JSValue ret=JS_Call(ctx,fn,JS_UNDEFINED,1,(JSValueConst*)&n);assert(!JS_IsException(ret));JS_FreeValue(ctx,ret);int jobs=0,j;while((j=JS_ExecutePendingJob(rt,&jobctx))>0){assert(jobctx==ctx);jobs++;}assert(j==0);ret=JS_Eval(ctx,\"seen===1000&&good===1000\",strlen(\"seen===1000&&good===1000\"),\"<check>\",0);assert(JS_IsBool(ret)&&JS_VALUE_GET_BOOL(ret));JS_FreeValue(ctx,ret);double wall=now(CLOCK_MONOTONIC)-t,cpu=now(CLOCK_PROCESS_CPUTIME_ID)-c;assert(!JS_HasException(ctx));if(expected<0)expected=jobs;assert(expected==jobs);if(r>=0)printf(\"%s{\\\"wallMs\\\":%.9f,\\\"cpuMs\\\":%.9f}\",r?\",\":\"\",wall,cpu);}printf(\"],\\\"jobs\\\":%d}\",expected);JS_FreeValue(ctx,fn);JS_FreeValue(ctx,n);JS_FreeContext(ctx);JS_RunGC(rt);JSMemoryUsage u;JS_ComputeMemoryUsage(rt,&u);assert(u.obj_count==0);JS_FreeRuntime(rt);}struct rusage u;assert(!getrusage(RUSAGE_SELF,&u));printf(\"],\\\"maxRssKiB\\\":%ld,\\\"compiler\\\":\\\"%s\\\"}\\n\",u.ru_maxrss,__VERSION__);}\nCOST\ncat > \"$RUNNER_TEMP/cost-runner.mjs\" <<'JS'\nimport assert from'node:assert/strict';import{execFileSync}from'node:child_process';import{readFileSync}from'node:fs';import{createHash}from'node:crypto';import{cpus,loadavg,freemem}from'node:os';\nconst mode=process.argv[2],tmp=process.env.RUNNER_TEMP,results=[],hash=p=>createHash('sha256').update(readFileSync(p)).digest('hex');for(let pair=0;pair<5;pair++)for(const arm of pair%2?['candidate','baseline']:['baseline','candidate']){const start={load:loadavg(),freeMemoryBytes:freemem()};let r;if(mode==='native'){const exe=tmp+'/'+arm+'-cost';r=JSON.parse(execFileSync(exe,[],{encoding:'utf8',timeout:300000,maxBuffer:2*1024*1024}));Object.assign(r,{arm,pair,cpu:cpus()[0]?.model,start,end:{load:loadavg(),freeMemoryBytes:freemem()},executableSha256:hash(exe),probeSha256:hash(tmp+'/native-cost.c')});}else r=JSON.parse(execFileSync(process.execPath,[tmp+'/generator-cost.mjs',tmp+'/wasi-dist',tmp+'/'+arm+'.wasm',arm,String(pair)],{encoding:'utf8',timeout:300000,maxBuffer:2*1024*1024}));results.push(r);console.log('GENERATOR_'+mode.toUpperCase()+'_RAW',JSON.stringify(r));}\nfor(const r of results){assert.equal(r.probeSha256,results[0].probeSha256);assert.equal(r.warm,200);assert.equal(r.timed,80);assert.equal(r.n,1000);assert.equal(r.rows.length,5);for(const row of r.rows){assert.equal(row.samples.length,80);assert.equal(row.jobs,results[0].rows.find(x=>x.kind===row.kind).jobs);for(const s of row.samples)assert(Number.isFinite(s.wallMs)&&s.wallMs>0&&Number.isFinite(s.cpuMs)&&s.cpuMs>0);}}\nconst median=a=>[...a].sort((a,b)=>a-b)[Math.floor(a.length/2)],p95=a=>[...a].sort((a,b)=>a-b)[Math.ceil(a.length*.95)-1];console.log('GENERATOR_'+mode.toUpperCase()+'_SUMMARY',JSON.stringify(results[0].rows.map(row=>({kind:row.kind,pairs:Array.from({length:5},(_,pair)=>{const arms=Object.fromEntries(results.filter(r=>r.pair===pair).map(r=>[r.arm,r.rows.find(x=>x.kind===row.kind).samples]));const metrics=Object.fromEntries(Object.entries(arms).map(([arm,a])=>[arm,{wallMedianMs:median(a.map(s=>s.wallMs)),cpuMedianMs:median(a.map(s=>s.cpuMs)),wallP95Ms:p95(a.map(s=>s.wallMs)),earlyMedianMs:median(a.slice(0,20).map(s=>s.wallMs)),lateMedianMs:median(a.slice(-20).map(s=>s.wallMs))}]));return{pair,arms:metrics,wallRatio:metrics.candidate.wallMedianMs/metrics.baseline.wallMedianMs,cpuRatio:metrics.candidate.cpuMedianMs/metrics.baseline.cpuMedianMs};})}))));\nJS\ngit restore --source=HEAD quickjs.c api-test.c\ncmake -S . -B \"$RUNNER_TEMP/cost-candidate\" -DCMAKE_BUILD_TYPE=Release\ncmake --build \"$RUNNER_TEMP/cost-candidate\" --target qjs -j2\ncc -O3 -I . \"$RUNNER_TEMP/native-cost.c\" \"$RUNNER_TEMP/cost-candidate/libqjs.a\" -lm -ldl -lpthread -o \"$RUNNER_TEMP/candidate-cost\"\ngit show fc8e21a7bfa76182639fbe4667864c6cf1c89499:quickjs.c > quickjs.c\ncmake -S . -B \"$RUNNER_TEMP/cost-baseline\" -DCMAKE_BUILD_TYPE=Release\ncmake --build \"$RUNNER_TEMP/cost-baseline\" --target qjs -j2\ncc -O3 -I . \"$RUNNER_TEMP/native-cost.c\" \"$RUNNER_TEMP/cost-baseline/libqjs.a\" -lm -ldl -lpthread -o \"$RUNNER_TEMP/baseline-cost\"\nnode \"$RUNNER_TEMP/cost-runner.mjs\" native\n"
+        }
+      ]
+    },
+    "wasi": {
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 30,
+      "steps": [
+        {
+          "uses": "actions/checkout@v4",
+          "with": {
+            "ref": "58a02a329b61549586d624bb639270f2f533dc68",
+            "fetch-depth": 16,
+            "path": "ng-source"
+          }
+        },
+        {
+          "name": "Extract only native production layers",
+          "shell": "bash",
+          "run": "set -euo pipefail\ngit -C ng-source diff d7215b0ad3fc2c562e8317fd9bca058fd4863804 fc8e21a7bfa76182639fbe4667864c6cf1c89499 -- quickjs.c > \"$RUNNER_TEMP/parent.patch\"\ngit -C ng-source diff fc8e21a7bfa76182639fbe4667864c6cf1c89499 58a02a329b61549586d624bb639270f2f533dc68 -- quickjs.c > \"$RUNNER_TEMP/generator.patch\"\nsha256sum \"$RUNNER_TEMP/\"*.patch\n"
+        },
+        {
+          "uses": "actions/checkout@v4",
+          "with": {
+            "repository": "vincentkoc/quickjs-wasi",
+            "ref": "6a9bb60e52314f843c7f52f1723b713024681338",
+            "path": "wasi",
+            "submodules": "recursive",
+            "fetch-depth": 32
+          }
+        },
+        {
+          "uses": "pnpm/action-setup@v4",
+          "with": {
+            "version": "10.30.3"
+          }
+        },
+        {
+          "uses": "actions/setup-node@v4",
+          "with": {
+            "node-version": "24.22.1",
+            "cache": "pnpm",
+            "cache-dependency-path": "wasi/pnpm-lock.yaml"
+          }
+        },
+        {
+          "name": "Build both source layers and run full wrapper suites",
+          "shell": "bash",
+          "working-directory": "wasi",
+          "run": "set -euo pipefail\ntest \"$(git -C quickjs-ng rev-parse HEAD)\" = 6d46d07d04041b40f4f49eaa7fdebe44c314c699\npnpm install --frozen-lockfile\nmake setup\ngit -C quickjs-ng apply --check \"$RUNNER_TEMP/parent.patch\"\ngit -C quickjs-ng apply \"$RUNNER_TEMP/parent.patch\"\nfor arm in baseline candidate; do\n if [ \"$arm\" = candidate ]; then\n  git -C quickjs-ng apply --check \"$RUNNER_TEMP/generator.patch\"\n  git -C quickjs-ng apply \"$RUNNER_TEMP/generator.patch\"\n fi\n pnpm run build\n cp quickjs.wasm \"$RUNNER_TEMP/$arm.wasm\"\n sha256sum quickjs.wasm dist/index.js\n pnpm test --reporter=json --outputFile=\"$RUNNER_TEMP/$arm-suite.json\"\n ARM=\"$arm\" node --input-type=module <<'JS'\nimport assert from'node:assert/strict';import{readFileSync}from'node:fs';const r=JSON.parse(readFileSync(process.env.RUNNER_TEMP+'/'+process.env.ARM+'-suite.json'));console.log('GENERATOR_WASI_SUITE',JSON.stringify({arm:process.env.ARM,passed:r.numPassedTests,failed:r.numFailedTests,files:r.testResults.length}));assert.equal(r.numFailedTests,0);assert.equal(r.numPassedTests,2076);\nJS\ndone\ncp -R dist \"$RUNNER_TEMP/wasi-dist\"\n"
+        },
+        {
+          "name": "Real backing allocator failure in async-generator resumption",
+          "shell": "bash",
+          "working-directory": "wasi",
+          "run": "set -euo pipefail\ncat > \"$RUNNER_TEMP/generator-proof.mjs\" <<'JS'\nimport assert from'node:assert/strict';import{readFileSync}from'node:fs';import{pathToFileURL}from'node:url';import{createHash}from'node:crypto';\nconst tmp=process.env.RUNNER_TEMP,{QuickJS}=await import(pathToFileURL(tmp+'/wasi-dist/index.js')),rows=[];\nfor(const arm of ['baseline','candidate']){const bytes=readFileSync(tmp+'/'+arm+'.wasm');using vm=await QuickJS.create({wasm:await WebAssembly.compile(bytes),memoryLimit:16*1024*1024});void vm.undefined;\n vm.evalCode('globalThis.bodies=0;globalThis.getters=0;globalThis.release=undefined;const gate=new Promise(r=>release=r);globalThis.gens=[];globalThis.requests=[];for(let i=0;i<2048;i++){const g=(async function*(){await gate})();gens.push(g);requests.push(g.next())}const then=(r)=>{bodies++;r(true)};Object.defineProperty(Object.prototype,\"then\",{configurable:true,get(){getters++;return then}})').dispose();\n using release=vm.evalCode('release');const e=vm._getExports();e.qjs_set_memory_limit(131073);using resolution=vm.callFunctionRaw(release,vm.undefined);assert.equal(e.qjs_is_exception(resolution.ptr),0);\n let failure,jobs=0;\n while(jobs<4096){const status=e.qjs_execute_pending_job();jobs++;const ptr=e.qjs_get_exception(),tag=e.qjs_typeof(ptr);if(tag!==4){failure={status,tag};e.qjs_set_memory_limit(16*1024*1024);e.qjs_free_value(ptr);break;}e.qjs_free_value(ptr);if(status<=0)break;}\n assert(failure);using counterHandle=vm.evalCode('JSON.stringify({getters,bodies})');const counts=JSON.parse(counterHandle.toString());assert.equal(counts.bodies,0);const state=vm.evalCode('requests['+(jobs-1)+']');const promiseState=state.promiseState;state.dispose();assert.equal(failure.status,arm==='candidate'?-1:1);if(arm==='candidate')assert.equal(promiseState,0);\n rows.push({arm,jobs,...failure,...counts,promiseState,wasmSha256:createHash('sha256').update(bytes).digest('hex')});\n}\nconsole.log('GENERATOR_WASI_ALLOCATOR',JSON.stringify(rows));console.log('GENERATOR_WASI_PROBE_SHA256',createHash('sha256').update(readFileSync(process.argv[1])).digest('hex'));\nJS\nnode \"$RUNNER_TEMP/generator-proof.mjs\"\n"
+        },
+        {
+          "name": "Five paired WASI lifecycle costs",
+          "shell": "bash",
+          "working-directory": "wasi",
+          "run": "set -euo pipefail\ncat > \"$RUNNER_TEMP/generator-cost.mjs\" <<'JS'\nimport assert from 'node:assert/strict';import{readFileSync}from'node:fs';import{pathToFileURL}from'node:url';import{createHash}from'node:crypto';import{cpus,loadavg,freemem}from'node:os';\nconst [dir,path,arm,pair]=process.argv.slice(2),{QuickJS}=await import(pathToFileURL(dir+'/index.js')),wasm=await WebAssembly.compile(readFileSync(path));const N=1000,W=200,T=80,rows=[],sources={\"completed-next\":\"(n)=>{globalThis.seen=0;globalThis.good=0;for(let i=0;i<n;i++)(async function*(){})().next().then(r=>{seen++;good+=r.done===true&&r.value===undefined})}\",\"yield\":\"(n)=>{globalThis.seen=0;globalThis.good=0;for(let i=0;i<n;i++)(async function*(){yield 1})().next().then(r=>{seen++;good+=r.done===false&&r.value===1})}\",\"await-return\":\"(n)=>{globalThis.seen=0;globalThis.good=0;for(let i=0;i<n;i++)(async function*(){await 0})().next().then(r=>{seen++;good+=r.done===true&&r.value===undefined})}\",\"completed-return\":\"(n)=>{globalThis.seen=0;globalThis.good=0;for(let i=0;i<n;i++)(async function*(){})().return(1).then(r=>{seen++;good+=r.done===true&&r.value===1})}\",\"promise-control\":\"(n)=>{globalThis.seen=0;globalThis.good=0;for(let i=0;i<n;i++)Promise.resolve(1).then(r=>{seen++;good+=r===1})}\"};\nfor(const[kind,code]of Object.entries(sources)){using vm=await QuickJS.create({wasm,memoryLimit:64*1024*1024});using fn=vm.evalCode(code);using n=vm.newNumber(N);let expectedJobs;const samples=[];for(let round=-W;round<T;round++){const cpu=process.cpuUsage(),at=performance.now();vm.callFunction(fn,vm.undefined,n).dispose();const jobs=vm.executePendingJobs();using check=vm.evalCode('seen===1000&&good===1000');assert.equal(check.toBoolean(),true);const wallMs=performance.now()-at,c=process.cpuUsage(cpu),cpuMs=(c.user+c.system)/1000;if(expectedJobs===undefined)expectedJobs=jobs;assert.equal(jobs,expectedJobs);assert.equal(vm.executePendingJobs(),0);if(round>=0)samples.push({wallMs,cpuMs});}rows.push({kind,jobs:expectedJobs,samples,memory:vm.getMemoryUsage(),wasmBytes:vm._getExports().memory.buffer.byteLength});}\nconst hash=p=>createHash('sha256').update(readFileSync(p)).digest('hex');console.log(JSON.stringify({arm,pair:Number(pair),rows,n:N,warm:W,timed:T,node:process.version,cpu:cpus()[0]?.model,load:loadavg(),resourceUsage:process.resourceUsage(),wasmSha256:hash(path),moduleSha256:hash(dir+'/index.js'),probeSha256:hash(process.argv[1])}));\nJS\ncat > \"$RUNNER_TEMP/cost-runner.mjs\" <<'JS'\nimport assert from'node:assert/strict';import{execFileSync}from'node:child_process';import{readFileSync}from'node:fs';import{createHash}from'node:crypto';import{cpus,loadavg,freemem}from'node:os';\nconst mode=process.argv[2],tmp=process.env.RUNNER_TEMP,results=[],hash=p=>createHash('sha256').update(readFileSync(p)).digest('hex');for(let pair=0;pair<5;pair++)for(const arm of pair%2?['candidate','baseline']:['baseline','candidate']){const start={load:loadavg(),freeMemoryBytes:freemem()};let r;if(mode==='native'){const exe=tmp+'/'+arm+'-cost';r=JSON.parse(execFileSync(exe,[],{encoding:'utf8',timeout:300000,maxBuffer:2*1024*1024}));Object.assign(r,{arm,pair,cpu:cpus()[0]?.model,start,end:{load:loadavg(),freeMemoryBytes:freemem()},executableSha256:hash(exe),probeSha256:hash(tmp+'/native-cost.c')});}else r=JSON.parse(execFileSync(process.execPath,[tmp+'/generator-cost.mjs',tmp+'/wasi-dist',tmp+'/'+arm+'.wasm',arm,String(pair)],{encoding:'utf8',timeout:300000,maxBuffer:2*1024*1024}));results.push(r);console.log('GENERATOR_'+mode.toUpperCase()+'_RAW',JSON.stringify(r));}\nfor(const r of results){assert.equal(r.probeSha256,results[0].probeSha256);assert.equal(r.warm,200);assert.equal(r.timed,80);assert.equal(r.n,1000);assert.equal(r.rows.length,5);for(const row of r.rows){assert.equal(row.samples.length,80);assert.equal(row.jobs,results[0].rows.find(x=>x.kind===row.kind).jobs);for(const s of row.samples)assert(Number.isFinite(s.wallMs)&&s.wallMs>0&&Number.isFinite(s.cpuMs)&&s.cpuMs>0);}}\nconst median=a=>[...a].sort((a,b)=>a-b)[Math.floor(a.length/2)],p95=a=>[...a].sort((a,b)=>a-b)[Math.ceil(a.length*.95)-1];console.log('GENERATOR_'+mode.toUpperCase()+'_SUMMARY',JSON.stringify(results[0].rows.map(row=>({kind:row.kind,pairs:Array.from({length:5},(_,pair)=>{const arms=Object.fromEntries(results.filter(r=>r.pair===pair).map(r=>[r.arm,r.rows.find(x=>x.kind===row.kind).samples]));const metrics=Object.fromEntries(Object.entries(arms).map(([arm,a])=>[arm,{wallMedianMs:median(a.map(s=>s.wallMs)),cpuMedianMs:median(a.map(s=>s.cpuMs)),wallP95Ms:p95(a.map(s=>s.wallMs)),earlyMedianMs:median(a.slice(0,20).map(s=>s.wallMs)),lateMedianMs:median(a.slice(-20).map(s=>s.wallMs))}]));return{pair,arms:metrics,wallRatio:metrics.candidate.wallMedianMs/metrics.baseline.wallMedianMs,cpuRatio:metrics.candidate.cpuMedianMs/metrics.baseline.cpuMedianMs};})}))));\nJS\nnode \"$RUNNER_TEMP/cost-runner.mjs\" wasi\n"
         }
       ]
     }
