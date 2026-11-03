@@ -1,0 +1,40 @@
+{
+  "name": "Thenable enqueue qualification",
+  "on": {
+    "workflow_dispatch": {}
+  },
+  "permissions": {
+    "contents": "read"
+  },
+  "jobs": {
+    "native": {
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 20,
+      "steps": [
+        {
+          "uses": "actions/checkout@v4",
+          "with": {
+            "fetch-depth": 8
+          }
+        },
+        {
+          "run": "set -euo pipefail\ncmake -S . -B \"$RUNNER_TEMP/candidate\" -DCMAKE_BUILD_TYPE=Release\ncmake --build \"$RUNNER_TEMP/candidate\" -j2\n\"$RUNNER_TEMP/candidate/api-test\"\n\"$RUNNER_TEMP/candidate/run-test262\" -c tests.conf\necho ADOPTION_RELEASE_PASS\npython3 <<'CONTROL'\nfrom pathlib import Path\np=Path('api-test.c');s=p.read_text();s=s[:s.index('int main(void)')]+'int main(int argc,char **argv) { assert(argc==3); promise_adoption_trial(atoi(argv[1]),atoi(argv[2]),-1,0); return 0; }\\n';p.write_text(s)\nCONTROL\ngit show 678c0404f70613129059bd17d1c847ab9b5c2590:quickjs.c > quickjs.c\ncmake -S . -B \"$RUNNER_TEMP/baseline\" -DCMAKE_BUILD_TYPE=Release\ncmake --build \"$RUNNER_TEMP/baseline\" --target api-test -j2\ngit restore --source=HEAD quickjs.c\npython3 <<'CONTROL'\nfrom pathlib import Path\np=Path('quickjs.c');s=p.read_text();a=s.index('                /* Intrinsic resolution can fail');b=s.index('            }',a);s=s[:a]+'                if (JS_IsUncatchableError(ctx->rt->current_exception)) {\\n                    is_success = false;\\n                } else {\\n                    abort(); /* BUG */\\n                }\\n' +s[b:];p.write_text(s)\nCONTROL\ncmake -S . -B \"$RUNNER_TEMP/enqueue-only\" -DCMAKE_BUILD_TYPE=Release\ncmake --build \"$RUNNER_TEMP/enqueue-only\" --target api-test -j2\ngit restore --source=HEAD quickjs.c api-test.c\ngit diff --exit-code\nulimit -c 0\npython3 <<'CONTROL'\nimport subprocess,os,json,signal\nrows=[]\nfor arm,mode,headroom,bad in [(a,m,h,a=='baseline' and h==0 and m!=3 or a=='enqueue-only' and h==0 and m==2) for a in ['baseline','enqueue-only'] for m in range(4) for h in [0,-1]]:\n p=subprocess.run([os.environ['RUNNER_TEMP']+'/'+arm+'/api-test',str(mode),str(headroom)],capture_output=True,text=True,timeout=120)\n row={'arm':arm,'mode':mode,'headroom':headroom,'exit':p.returncode,'stderr':p.stderr[-600:]};rows.append(row)\n assert p.returncode==(-signal.SIGABRT if bad else 0),row\nprint('ADOPTION_OLD_CONTROLS',json.dumps(rows))\nCONTROL\n",
+          "shell": "bash"
+        }
+      ]
+    },
+    "sanitizers": {
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 20,
+      "steps": [
+        {
+          "uses": "actions/checkout@v4"
+        },
+        {
+          "run": "set -euo pipefail\ncmake -S . -B \"$RUNNER_TEMP/build\" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DQJS_ENABLE_ASAN=ON -DQJS_ENABLE_UBSAN=ON\ncmake --build \"$RUNNER_TEMP/build\" -j2\n\"$RUNNER_TEMP/build/api-test\"\n\"$RUNNER_TEMP/build/run-test262\" -c tests.conf\necho ADOPTION_SANITIZED_PASS\n",
+          "shell": "bash"
+        }
+      ]
+    }
+  }
+}
