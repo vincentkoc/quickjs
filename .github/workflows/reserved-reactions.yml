@@ -1,72 +1,30 @@
 {
-  "name": "Suspended generator real allocator proof on identical binaries",
+  "name": "Generator allocator proof using measured CI artifacts",
   "on": {
     "workflow_dispatch": {}
   },
   "permissions": {
-    "contents": "read"
+    "contents": "read",
+    "actions": "read"
   },
   "jobs": {
-    "wasi": {
+    "allocator": {
       "runs-on": "ubuntu-latest",
-      "timeout-minutes": 30,
+      "timeout-minutes": 10,
       "steps": [
         {
-          "uses": "actions/checkout@v4",
-          "with": {
-            "ref": "d1cef1501a841cda4330d9b4abeb593dd019a686",
-            "fetch-depth": 32,
-            "path": "ng-source"
-          }
-        },
-        {
-          "name": "Extract only native production layers",
-          "shell": "bash",
-          "run": "set -euo pipefail\ngit -C ng-source diff d7215b0ad3fc2c562e8317fd9bca058fd4863804 fc8e21a7bfa76182639fbe4667864c6cf1c89499 -- quickjs.c > \"$RUNNER_TEMP/parent.patch\"\ngit -C ng-source diff fc8e21a7bfa76182639fbe4667864c6cf1c89499 d1cef1501a841cda4330d9b4abeb593dd019a686 -- quickjs.c > \"$RUNNER_TEMP/generator.patch\"\nsha256sum \"$RUNNER_TEMP/\"*.patch\n"
-        },
-        {
-          "uses": "actions/checkout@v4",
-          "with": {
-            "repository": "vincentkoc/quickjs-wasi",
-            "ref": "6a9bb60e52314f843c7f52f1723b713024681338",
-            "path": "wasi",
-            "submodules": "recursive",
-            "fetch-depth": 32
-          }
-        },
-        {
-          "uses": "pnpm/action-setup@v4",
-          "with": {
-            "version": "10.30.3"
-          }
-        },
-        {
-          "uses": "actions/setup-node@v4",
-          "with": {
-            "node-version": "24.22.1",
-            "cache": "pnpm",
-            "cache-dependency-path": "wasi/pnpm-lock.yaml"
-          }
-        },
-        {
-          "name": "Rebuild the identical measured binaries for targeted allocator probe",
-          "shell": "bash",
-          "working-directory": "wasi",
-          "run": "set -euo pipefail\npnpm install --frozen-lockfile\nmake setup\ngit -C quickjs-ng apply --check \"$RUNNER_TEMP/parent.patch\"\ngit -C quickjs-ng apply \"$RUNNER_TEMP/parent.patch\"\nfor arm in baseline candidate; do\n if [ \"$arm\" = candidate ]; then\n  git -C quickjs-ng apply --check \"$RUNNER_TEMP/generator.patch\"\n  git -C quickjs-ng apply \"$RUNNER_TEMP/generator.patch\"\n fi\n pnpm run build\n cp quickjs.wasm \"$RUNNER_TEMP/$arm.wasm\"\ndone\ncp -R dist \"$RUNNER_TEMP/wasi-dist\"\ncd \"$RUNNER_TEMP\"\nsha256sum -c <<'HASHES'\n4fcd0727dcc0bf37964b42698c55587a9ef7d4f009f744abc57335489d1a8b0c  baseline.wasm\nf43a23524465ad0459c908164e4db3c8aca071ba0a306231a7c7f01c6ee3d59c  candidate.wasm\n2439338da0cdc954949487f044cdab0db1eebcf429eac1ae2cb4f6af4e07e974  wasi-dist/index.js\nHASHES\n"
-        },
-        {
-          "uses": "actions/upload-artifact@v4",
+          "uses": "actions/download-artifact@v4",
           "with": {
             "name": "generator-delivery-wasi",
-            "path": "${{ runner.temp }}/baseline.wasm\n${{ runner.temp }}/candidate.wasm\n${{ runner.temp }}/wasi-dist/",
-            "retention-days": 1
+            "run-id": 41618356147,
+            "github-token": "${{ github.token }}",
+            "path": "${{ runner.temp }}/generator-proof"
           }
         },
         {
-          "name": "Real allocator failure while suspended frames remain live",
+          "name": "Bounded allocation alignment with prepared spare capabilities",
           "shell": "bash",
-          "working-directory": "wasi",
-          "run": "set -euo pipefail\ncat > \"$RUNNER_TEMP/generator-proof.mjs\" <<'JS'\nimport assert from'node:assert/strict';import{readFileSync}from'node:fs';import{pathToFileURL}from'node:url';import{createHash}from'node:crypto';\nconst tmp=process.env.RUNNER_TEMP,{QuickJS}=await import(pathToFileURL(tmp+'/wasi-dist/index.js')),rows=[];\nfor(const arm of ['baseline','candidate']){const bytes=readFileSync(tmp+'/'+arm+'.wasm');using vm=await QuickJS.create({wasm:await WebAssembly.compile(bytes),memoryLimit:16*1024*1024});void vm.undefined;\n vm.evalCode('globalThis.bodies=0;globalThis.getters=0;globalThis.release=undefined;const gate=new Promise(r=>release=r);globalThis.gens=[];globalThis.requests=[];for(let i=0;i<2048;i++){const g=(async function*(){yield gate})();gens.push(g);requests.push(g.next())}const then=(r)=>{bodies++;r(true)};Object.defineProperty(Object.prototype,\"then\",{configurable:true,get(){getters++;return then}})').dispose();\n using release=vm.evalCode('release');const e=vm._getExports();e.qjs_set_memory_limit(131073);using resolution=vm.callFunctionRaw(release,vm.undefined);assert.equal(e.qjs_is_exception(resolution.ptr),0);\n let failure,jobs=0;\n while(jobs<4096){const status=e.qjs_execute_pending_job();jobs++;const ptr=e.qjs_get_exception(),tag=e.qjs_typeof(ptr);if(tag!==4){failure={status,tag};e.qjs_set_memory_limit(16*1024*1024);e.qjs_free_value(ptr);break;}e.qjs_free_value(ptr);if(status<=0)break;}\n console.log('GENERATOR_ALLOCATOR_PROGRESS',JSON.stringify({arm,jobs,failure:failure??null}));assert(failure);using counterHandle=vm.evalCode('JSON.stringify({getters,bodies})');const counts=JSON.parse(counterHandle.toString());assert.equal(counts.bodies,0);const state=vm.evalCode('requests['+(jobs-1)+']');const promiseState=state.promiseState;state.dispose();assert.equal(failure.status,arm==='candidate'?-1:1);if(arm==='candidate')assert.equal(promiseState,0);\n rows.push({arm,jobs,...failure,...counts,promiseState,wasmSha256:createHash('sha256').update(bytes).digest('hex')});\n}\nconsole.log('GENERATOR_WASI_ALLOCATOR',JSON.stringify(rows));console.log('GENERATOR_WASI_PROBE_SHA256',createHash('sha256').update(readFileSync(process.argv[1])).digest('hex'));\nJS\nnode \"$RUNNER_TEMP/generator-proof.mjs\"\n"
+          "run": "set -euo pipefail\ncat > \"$RUNNER_TEMP/generator-proof.mjs\" <<'JS'\nimport assert from'node:assert/strict';import{readFileSync}from'node:fs';import{pathToFileURL}from'node:url';import{createHash}from'node:crypto';\nconst tmp=process.env.RUNNER_TEMP+'/generator-proof',{QuickJS}=await import(pathToFileURL(tmp+'/wasi-dist/index.js')),rows=[],N=512,K=4;\nfor(const arm of ['baseline','candidate']){const bytes=readFileSync(tmp+'/'+arm+'.wasm'),wasm=await WebAssembly.compile(bytes);\nfor(let prime=0;prime<=K;prime++){using vm=await QuickJS.create({wasm,memoryLimit:16*1024*1024});void vm.undefined;\n vm.evalCode('globalThis.phase=0;globalThis.getters=0;globalThis.bodies=0;globalThis.extraIndex=0;globalThis.extraResolves=[];globalThis.release=undefined;const gate=new Promise(r=>release=r);globalThis.gens=[];globalThis.requests=[];for(let i=0;i<'+N+';i++){const g=(async function*(){yield gate})();gens.push(g);requests.push(g.next())}for(let i=0;i<'+(N*K+prime)+';i++)new Promise(r=>extraResolves.push(r));const then=r=>{bodies++;r(true)};globalThis.t={then};Object.defineProperty(Object.prototype,\"then\",{configurable:true,get(){getters++;phase=1;for(let j=0;j<'+K+';j++)extraResolves[extraIndex++](t);phase=2;return then}})').dispose();\n using release=vm.evalCode('release'),readPhase=vm.evalCode('()=>phase'),priming=vm.evalCode('()=>{for(let j=0;j<'+prime+';j++)extraResolves[extraIndex++](t)}');const e=vm._getExports();vm.callFunctionRaw(release,vm.undefined).dispose();vm.callFunctionRaw(priming,vm.undefined).dispose();e.qjs_set_memory_limit(131073);\n let observation,jobs=0;\n while(jobs<N){const status=e.qjs_execute_pending_job();jobs++;const ptr=e.qjs_get_exception(),tag=e.qjs_typeof(ptr);e.qjs_free_value(ptr);using ph=vm.callFunctionRaw(readPhase,vm.undefined);const phase=ph.toNumber();if(tag!==4||phase===1||status<=0){observation={status,tag,phase};break;}}\n e.qjs_set_memory_limit(16*1024*1024);using h=vm.evalCode('JSON.stringify({getters,bodies,extraIndex})');const counts=JSON.parse(h.toString());using request=vm.evalCode('requests['+(jobs-1)+']');const state=request.promiseState;const row={arm,prime,jobs,observation:observation??null,...counts,promiseState:state,wasmSha256:createHash('sha256').update(bytes).digest('hex')};rows.push(row);console.log('GENERATOR_ALLOCATOR_SEARCH',JSON.stringify(row));assert.equal(counts.bodies,0);\n}}\nconst match=Array.from({length:K+1},(_,prime)=>rows.filter(r=>r.prime===prime)).find(a=>a.length===2&&a.every(r=>r.observation&&r.observation.tag!==4&&r.observation.phase===2&&r.getters===r.jobs)&&a.find(r=>r.arm==='baseline').observation.status===1&&a.find(r=>r.arm==='candidate').observation.status===-1);\nassert(match,'no own-adoption failure in the bounded alignment cases');const candidate=match.find(r=>r.arm==='candidate');assert.equal(candidate.promiseState,0);assert.equal(match[0].jobs,match[1].jobs);console.log('GENERATOR_WASI_ALLOCATOR',JSON.stringify(match));console.log('GENERATOR_WASI_PROBE_SHA256',createHash('sha256').update(readFileSync(process.argv[1])).digest('hex'));\nJS\nnode \"$RUNNER_TEMP/generator-proof.mjs\"\n"
         }
       ]
     }
