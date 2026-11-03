@@ -30,7 +30,8 @@
             "repository": "vincentkoc/quickjs-wasi",
             "ref": "bd88c9645948247ff5c3cfc7c10eeefc3b51f8c2",
             "path": "wasi",
-            "submodules": "recursive"
+            "submodules": "recursive",
+            "fetch-depth": 32
           }
         },
         {
