@@ -11,66 +11,27 @@
     "contents": "read"
   },
   "jobs": {
-    "wasi": {
+    "native-diagnostic": {
       "runs-on": "ubuntu-latest",
-      "timeout-minutes": 35,
+      "timeout-minutes": 25,
       "steps": [
         {
           "uses": "actions/checkout@v4",
           "with": {
             "ref": "37f02b6d6b804c21fb8833bebd9ef1697fc44129",
-            "fetch-depth": 8,
-            "path": "ng-source"
-          }
-        },
-        {
-          "name": "Extract only native production layers",
-          "shell": "bash",
-          "run": "set -euo pipefail\ngit -C ng-source diff d7215b0ad3fc2c562e8317fd9bca058fd4863804 d3c90857ccba4c47b39d023280726efa276e3098 -- quickjs.c > \"$RUNNER_TEMP/parent.patch\"\ngit -C ng-source diff d3c90857ccba4c47b39d023280726efa276e3098 37f02b6d6b804c21fb8833bebd9ef1697fc44129 -- quickjs.c > \"$RUNNER_TEMP/reserved.patch\"\nsha256sum \"$RUNNER_TEMP/\"*.patch\n"
-        },
-        {
-          "uses": "actions/checkout@v4",
-          "with": {
-            "repository": "vincentkoc/quickjs-wasi",
-            "ref": "feb11a3da64e22f5774fc2cb6d6c6372b364e9ba",
-            "path": "wasi",
-            "submodules": "recursive"
-          }
-        },
-        {
-          "uses": "pnpm/action-setup@v4",
-          "with": {
-            "version": "10.30.3"
+            "fetch-depth": 8
           }
         },
         {
           "uses": "actions/setup-node@v4",
           "with": {
-            "node-version": "24.22.1",
-            "cache": "pnpm",
-            "cache-dependency-path": "wasi/pnpm-lock.yaml"
+            "node-version": "24.22.1"
           }
         },
         {
-          "name": "Build and test matched pinned WASI pair",
+          "name": "Isolate failing settlement fixture",
           "shell": "bash",
-          "working-directory": "wasi",
-          "run": "set -euo pipefail\ntest \"$(git -C quickjs-ng rev-parse HEAD)\" = 6d46d07d04041b40f4f49eaa7fdebe44c314c699\npnpm install --frozen-lockfile\nmake setup\ngit -C quickjs-ng apply --check \"$RUNNER_TEMP/parent.patch\"\ngit -C quickjs-ng apply \"$RUNNER_TEMP/parent.patch\"\nfor arm in baseline candidate; do\n  if [ \"$arm\" = candidate ]; then\n    git -C quickjs-ng apply --check \"$RUNNER_TEMP/reserved.patch\"\n    git -C quickjs-ng apply \"$RUNNER_TEMP/reserved.patch\"\n  fi\n  git -C quickjs-ng diff --check\n  pnpm run build\n  cp quickjs.wasm \"$RUNNER_TEMP/$arm.wasm\"\n  sha256sum quickjs.wasm dist/index.js\n  set +e\n  pnpm test --reporter=json --outputFile=\"$RUNNER_TEMP/$arm-suite.json\"\n  status=$?\n  set -e\n  ARM=\"$arm\" node --input-type=module <<'JS'\nimport {readFileSync} from 'node:fs';\nconst r=JSON.parse(readFileSync(process.env.RUNNER_TEMP+'/'+process.env.ARM+'-suite.json'));\nconsole.log('SUB_WASI_SUITE',JSON.stringify({arm:process.env.ARM,passed:r.numPassedTests,failed:r.numFailedTests,files:r.testResults.length,failures:r.testResults.flatMap(x=>x.assertionResults).filter(x=>x.status==='failed').map(x=>({title:x.title,messages:x.failureMessages}))}));\nJS\n  echo \"suite-exit arm=$arm status=$status\"\ndone"
-        },
-        {
-          "name": "Real allocator pending-settlement proof",
-          "shell": "bash",
-          "run": "set -euo pipefail\ncat > \"$RUNNER_TEMP/pending-proof.mjs\" <<'JS'\nimport assert from 'node:assert/strict';\nimport {readFileSync} from 'node:fs';\nimport {pathToFileURL} from 'node:url';\nimport {resolve} from 'node:path';\nconst {QuickJS,JSException}=await import(pathToFileURL(resolve('wasi/dist/index.js'))),tmp=process.env.RUNNER_TEMP;\nconst rows=[];\nfor(const arm of ['baseline','candidate'])for(const operation of ['resolve','reject']){\n const wasm=await WebAssembly.compile(readFileSync(tmp+'/'+arm+'.wasm'));\n using vm=await QuickJS.create({wasm,memoryLimit:16*1024*1024});\n void vm.true;void vm.undefined;let calls=0;\n using fn=vm.newFunction('observer',v=>{assert.equal(v.toBoolean(),true);calls++;return vm.true;});\n const d=vm.newPromise();using source=d.handle;\n const derived=Array.from({length:512},()=>vm.promiseThenRaw(source,fn,fn));\n vm._getExports().qjs_set_memory_limit(131073);let caught;\n try{d[operation](vm.true);}catch(e){caught=e;}\n vm._getExports().qjs_set_memory_limit(16*1024*1024);\n if(caught){assert(caught instanceof JSException);caught.dispose();}\n using pending=vm.getException();const pendingType=vm._getExports().qjs_typeof(pending.ptr);\n assert.equal(source.promiseState,operation==='resolve'?1:2);assert.equal(calls,0);\n const jobs=vm.executePendingJobs(),lost=derived.filter(h=>h.promiseState===0).length;\n rows.push({arm,operation,pendingType,jobs,calls,lost,subscribers:512,caught:!!caught});\n if(arm==='candidate'){assert.equal(pendingType,4);assert(!caught);assert.equal(jobs,512);assert.equal(calls,512);assert.equal(lost,0);}\n else{assert.notEqual(pendingType,4);assert(jobs<512);assert(lost>0);}\n for(const h of derived)h.dispose();vm.unregisterHostCallback('observer');vm.runGC();\n}\nconsole.log('RESERVED_WASI_BOUNDARY',JSON.stringify(rows));\nJS\nnode \"$RUNNER_TEMP/pending-proof.mjs\"\n"
-        },
-        {
-          "name": "Matched WASI subscription cost",
-          "shell": "bash",
-          "run": "set -euo pipefail\ncat > \"$RUNNER_TEMP/wasi-cost.mjs\" <<'JS'\nimport assert from 'node:assert/strict';\nimport {readFileSync} from 'node:fs';\nimport {createHash} from 'node:crypto';\nimport {cpus,loadavg,freemem} from 'node:os';\nimport {pathToFileURL} from 'node:url';\nimport {resolve} from 'node:path';\nconst [root,wasmPath,arm,pair]=process.argv.slice(2);\nconst {QuickJS}=await import(pathToFileURL(resolve(root,'index.js')));\nconst bytes=readFileSync(wasmPath),wasm=await WebAssembly.compile(bytes);\nconst hash=b=>createHash('sha256').update(b).digest('hex'),env=()=>({load:loadavg(),freeMemoryBytes:freemem()});\nconst start=env(),rows=[],N=1000;\nfor(const kind of ['settled-pending','settled-fulfilled','settled-rejected','raw-fulfilled','raw-rejected']){\n using vm=await QuickJS.create({wasm,memoryLimit:64*1024*1024});\n void vm.true;void vm.undefined;\n let calls=0;using fn=vm.newFunction('handler',v=>{assert.equal(v.toBoolean(),true);calls++;return vm.true;});\n const owned=vm._ownedHandles.size,callbacks=vm.hostCallbacks.size,samples=[];\n let previousCount;\n for(let round=-20;round<40;round++){\n   const deferreds=Array.from({length:N},()=>vm.newPromise());\n   for(const d of deferreds)if(kind!=='settled-pending')d[kind.endsWith('rejected')?'reject':'resolve'](vm.true);\n   calls=0;let done=0;\n   const values=[],cpu=process.cpuUsage(),at=performance.now();\n   for(const d of deferreds)values.push(kind.startsWith('settled')?d.settled:vm.promiseThenRaw(d.handle,fn,fn));\n   const wallMs=performance.now()-at,elapsed=process.cpuUsage(cpu);\n   if(kind.startsWith('settled')){\n     for(let i=0;i<N;i++){assert.equal(deferreds[i].settled,values[i]);values[i].then(()=>done++);}\n     assert.equal(vm.hostCallbacks.size,callbacks+N);\n   }else for(const h of values)assert.equal(h.promiseState,0);\n   assert.equal(calls,0);assert.equal(done,0);\n   for(const d of deferreds)if(kind==='settled-pending')d.resolve(vm.true);\n   assert.equal(vm.executePendingJobs(),N);await Promise.resolve();\n   assert.equal(vm.executePendingJobs(),0);\n   if(kind.startsWith('settled'))assert.equal(done,N);\n   else{\n     assert.equal(calls,N);\n     for(const h of values){assert.equal(h.promiseState,1);h.dispose();}\n   }\n   for(const d of deferreds){\n     assert.equal(d.handle.promiseState,kind.endsWith('rejected')?2:1);\n     const result=await vm.resolvePromise(d.handle);\n     const value='value'in result?result.value:result.error;\n     assert.equal(value.consume(v=>v.toBoolean()),true);d.handle.dispose();\n   }\n   vm.runGC();assert.equal(vm._ownedHandles.size,owned);assert.equal(vm.hostCallbacks.size,callbacks);\n   using pending=vm.getException();assert.equal(vm._getExports().qjs_typeof(pending.ptr),4);\n   const count=vm.getMemoryUsage().objCount;\n   if(previousCount!==undefined)assert.equal(count,previousCount);\n   previousCount=count;\n   if(round>=0)samples.push({wallMs,cpuMs:(elapsed.user+elapsed.system)/1000});\n }\n rows.push({kind,samples});\n}\nconsole.log(JSON.stringify({arm,pair:Number(pair),rows,node:process.version,cpu:cpus()[0]?.model,start,end:env(),wasmSha256:hash(bytes),moduleSha256:hash(readFileSync(resolve(root,'index.js'))),probeSha256:hash(readFileSync(new URL(import.meta.url))),warmups:20,rounds:40,operationsPerBatch:N}));\n\nJS\ncat > \"$RUNNER_TEMP/cost-runner.mjs\" <<'JS'\nimport assert from 'node:assert/strict';\nimport {execFileSync} from 'node:child_process';\nimport {readFileSync} from 'node:fs';\nimport {createHash} from 'node:crypto';\nimport {cpus,loadavg,freemem} from 'node:os';\nconst mode=process.argv[2],tmp=process.env.RUNNER_TEMP,results=[];\nconst hash=p=>createHash('sha256').update(readFileSync(p)).digest('hex');\nfor(let pair=0;pair<5;pair++)for(const arm of pair%2?['candidate','baseline']:['baseline','candidate']){\n  const start={load:loadavg(),freeMemoryBytes:freemem()};\n  let r;\n  if(mode==='native'){\n    const exe=tmp+'/'+arm+'-cost';\n    r=JSON.parse(execFileSync(exe,[],{encoding:'utf8',timeout:300000,maxBuffer:1024*1024}));\n    Object.assign(r,{arm,pair,cpu:cpus()[0]?.model,start,end:{load:loadavg(),freeMemoryBytes:freemem()},executableSha256:hash(exe),probeSha256:hash(tmp+'/native-cost.c')});\n  }else r=JSON.parse(execFileSync(process.execPath,[tmp+'/wasi-cost.mjs','wasi/dist',tmp+'/'+arm+'.wasm',arm,String(pair)],{encoding:'utf8',timeout:300000,maxBuffer:1024*1024}));\n  results.push(r);console.log('META_'+mode.toUpperCase()+'_RAW',JSON.stringify(r));\n}\nfor(const r of results){\n  assert.equal(r.probeSha256,results[0].probeSha256);\n  for(const row of r.rows){assert.equal(row.samples.length,40);for(const s of row.samples)assert(Number.isFinite(s.wallMs)&&s.wallMs>0&&Number.isFinite(s.cpuMs)&&s.cpuMs>0);}\n}\nconst median=a=>[...a].sort((a,b)=>a-b)[Math.floor(a.length/2)],p95=a=>[...a].sort((a,b)=>a-b)[Math.ceil(a.length*.95)-1];\nconsole.log('META_'+mode.toUpperCase()+'_SUMMARY',JSON.stringify(results[0].rows.map(row=>({kind:row.kind,pairs:Array.from({length:5},(_,pair)=>{\n  const arms=Object.fromEntries(results.filter(r=>r.pair===pair).map(r=>[r.arm,r.rows.find(x=>x.kind===row.kind).samples]));\n  const metrics=Object.fromEntries(Object.entries(arms).map(([arm,a])=>[arm,{wallMedianMs:median(a.map(s=>s.wallMs)),cpuMedianMs:median(a.map(s=>s.cpuMs)),wallP95Ms:p95(a.map(s=>s.wallMs)),earlyMedianMs:median(a.slice(0,10).map(s=>s.wallMs)),lateMedianMs:median(a.slice(-10).map(s=>s.wallMs))}]));\n  return{pair,arms:metrics,wallRatio:metrics.candidate.wallMedianMs/metrics.baseline.wallMedianMs,cpuRatio:metrics.candidate.cpuMedianMs/metrics.baseline.cpuMedianMs};\n})}))));\n\nJS\nnode \"$RUNNER_TEMP/cost-runner.mjs\" wasi"
-        },
-        {
-          "name": "Require both full WASI suites",
-          "shell": "bash",
-          "run": "node --input-type=module <<'JS'\nimport assert from 'node:assert/strict';import {readFileSync} from 'node:fs';\nfor(const arm of ['baseline','candidate']){const r=JSON.parse(readFileSync(process.env.RUNNER_TEMP+'/'+arm+'-suite.json'));assert.equal(r.numFailedTests,0);assert.equal(r.numPassedTests,2050);}\nJS\n"
+          "run": "set -euo pipefail\npython3 <<'CONTROL'\nfrom pathlib import Path\np=Path('api-test.c');s=p.read_text()\ns=s.replace('    assert(argc == 1 && JS_IsSameValue(ctx, argv[0], JS_TRUE));','    if(argc != 1 || !JS_IsSameValue(ctx, argv[0], JS_TRUE)) fprintf(stderr,\"bad handler magic=%d argc=%d tag=%d bool=%d\\\\n\",magic,argc,argc?JS_VALUE_GET_TAG(argv[0]):999,argc?JS_ToBool(ctx,argv[0]):-1);\\n    assert(argc == 1 && JS_IsSameValue(ctx, argv[0], JS_TRUE));')\ns=s[:s.index('int main(void)')]+'int main(int argc,char **argv) { assert(argc==4); if(atoi(argv[1])==0) promise_settlement_trial(atoi(argv[2]),atoi(argv[3]),-1); else if(atoi(argv[1])==1) promise_settlement_async(atoi(argv[2])); else promise_settlement_lifecycle(atoi(argv[2])); return 0; }\\n'\np.write_text(s)\nCONTROL\nfor arm in candidate baseline; do\n if [ \"$arm\" = baseline ]; then git show d3c90857ccba4c47b39d023280726efa276e3098:quickjs.c > quickjs.c; fi\n cmake -S . -B \"$RUNNER_TEMP/$arm-build\" -DCMAKE_BUILD_TYPE=Release\n cmake --build \"$RUNNER_TEMP/$arm-build\" --target api-test -j2\ndone\nulimit -c 0\npython3 <<'CONTROL'\nimport subprocess,os,json\nfor arm in ['candidate','baseline']:\n for case in [(0,r,l) for r in range(2) for l in range(2)]+[(1,r,0) for r in range(2)]+[(2,m,0) for m in range(3)]:\n  p=subprocess.run([os.environ['RUNNER_TEMP']+'/'+arm+'-build/api-test',*map(str,case)],capture_output=True,text=True,timeout=120)\n  print('RESERVED_DIAG',json.dumps({'arm':arm,'case':case,'code':p.returncode,'stderr':p.stderr[-1800:]}),flush=True)\nCONTROL\n"
         }
       ]
     }
