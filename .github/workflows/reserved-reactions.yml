@@ -1,0 +1,51 @@
+{
+  "name": "Async-generator delivery allocation qualification",
+  "on": {
+    "workflow_dispatch": {}
+  },
+  "permissions": {
+    "contents": "read"
+  },
+  "jobs": {
+    "native": {
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 20,
+      "steps": [
+        {
+          "uses": "actions/checkout@v4",
+          "with": {
+            "ref": "ef79d94fe96d6f8f5a5c0bbdbf9398b0cd2e7922",
+            "fetch-depth": 16
+          }
+        },
+        {
+          "name": "Release and parent failure controls",
+          "shell": "bash",
+          "run": "set -euo pipefail\ncmake -S . -B \"$RUNNER_TEMP/candidate\" -DCMAKE_BUILD_TYPE=Release\ncmake --build \"$RUNNER_TEMP/candidate\" -j2\n\"$RUNNER_TEMP/candidate/api-test\"\n\"$RUNNER_TEMP/candidate/run-test262\" -c tests.conf\necho GENERATOR_RELEASE_PASS\npython3 <<'CONTROL'\nfrom pathlib import Path\np=Path('api-test.c');s=p.read_text();s=s[:s.index('int main(void)')]+'int main(int argc,char **argv) { assert(argc==3); generator_delivery_trial(atoi(argv[1]),atoi(argv[2])); return 0; }\\n';p.write_text(s)\nCONTROL\ngit show fc8e21a7bfa76182639fbe4667864c6cf1c89499:quickjs.c > quickjs.c\ncmake -S . -B \"$RUNNER_TEMP/baseline\" -DCMAKE_BUILD_TYPE=Release\ncmake --build \"$RUNNER_TEMP/baseline\" --target api-test -j2\nulimit -c 0\npython3 <<'CONTROL'\nimport subprocess,os,json,signal\nrows=[]\nfor mode in range(9):\n for headroom in [0,-1]:\n  p=subprocess.run([os.environ['RUNNER_TEMP']+'/baseline/api-test',str(mode),str(headroom)],capture_output=True,text=True,timeout=120)\n  row={'mode':mode,'headroom':headroom,'exit':p.returncode,'stderr':p.stderr[-500:]};rows.append(row)\n  assert p.returncode==(-signal.SIGABRT if headroom==0 else 0),row\nprint('GENERATOR_OLD_CONTROLS',json.dumps(rows))\nCONTROL\n"
+        }
+      ]
+    },
+    "sanitizers": {
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 20,
+      "env": {
+        "ASAN_OPTIONS": "halt_on_error=1",
+        "UBSAN_OPTIONS": "halt_on_error=1"
+      },
+      "steps": [
+        {
+          "uses": "actions/checkout@v4",
+          "with": {
+            "ref": "ef79d94fe96d6f8f5a5c0bbdbf9398b0cd2e7922",
+            "fetch-depth": 16
+          }
+        },
+        {
+          "name": "ASan UBSan allocation and regression tests",
+          "shell": "bash",
+          "run": "set -euo pipefail\ncmake -S . -B \"$RUNNER_TEMP/build\" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DQJS_ENABLE_ASAN=ON -DQJS_ENABLE_UBSAN=ON\ncmake --build \"$RUNNER_TEMP/build\" -j2\n\"$RUNNER_TEMP/build/api-test\"\n\"$RUNNER_TEMP/build/run-test262\" -c tests.conf\necho GENERATOR_SANITIZED_PASS\n"
+        }
+      ]
+    }
+  }
+}
