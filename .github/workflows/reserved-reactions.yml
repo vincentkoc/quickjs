@@ -1,0 +1,60 @@
+{
+  "name": "Host Promise lifecycle qualification",
+  "on": {
+    "workflow_dispatch": {}
+  },
+  "permissions": {
+    "contents": "read"
+  },
+  "jobs": {
+    "wasi": {
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 25,
+      "steps": [
+        {
+          "uses": "actions/checkout@v4",
+          "with": {
+            "ref": "fc8e21a7bfa76182639fbe4667864c6cf1c89499",
+            "fetch-depth": 16,
+            "path": "ng-source"
+          }
+        },
+        {
+          "name": "Extract only native production layers",
+          "shell": "bash",
+          "run": "set -euo pipefail\ngit -C ng-source diff d7215b0ad3fc2c562e8317fd9bca058fd4863804 678c0404f70613129059bd17d1c847ab9b5c2590 -- quickjs.c > \"$RUNNER_TEMP/parent.patch\"\ngit -C ng-source diff 678c0404f70613129059bd17d1c847ab9b5c2590 fc8e21a7bfa76182639fbe4667864c6cf1c89499 -- quickjs.c > \"$RUNNER_TEMP/reserved.patch\"\nsha256sum \"$RUNNER_TEMP/\"*.patch\n"
+        },
+        {
+          "uses": "actions/checkout@v4",
+          "with": {
+            "repository": "vincentkoc/quickjs-wasi",
+            "ref": "6a323aa32596f524e15233eb10d2ab020bba4a92",
+            "path": "wasi",
+            "submodules": "recursive",
+            "fetch-depth": 32
+          }
+        },
+        {
+          "uses": "pnpm/action-setup@v4",
+          "with": {
+            "version": "10.30.3"
+          }
+        },
+        {
+          "uses": "actions/setup-node@v4",
+          "with": {
+            "node-version": "24.22.1",
+            "cache": "pnpm",
+            "cache-dependency-path": "wasi/pnpm-lock.yaml"
+          }
+        },
+        {
+          "name": "Full suites on both engines and old-wrapper failure controls",
+          "shell": "bash",
+          "working-directory": "wasi",
+          "run": "set -euo pipefail\ntest \"$(git -C quickjs-ng rev-parse HEAD)\" = 6d46d07d04041b40f4f49eaa7fdebe44c314c699\npnpm install --frozen-lockfile\nmake setup\nfor engine in pinned patched; do\n if [ \"$engine\" = patched ]; then\n  git -C quickjs-ng apply --check \"$RUNNER_TEMP/parent.patch\"\n  git -C quickjs-ng apply \"$RUNNER_TEMP/parent.patch\"\n  git -C quickjs-ng apply --check \"$RUNNER_TEMP/reserved.patch\"\n  git -C quickjs-ng apply \"$RUNNER_TEMP/reserved.patch\"\n fi\n pnpm run build\n cp quickjs.wasm \"$RUNNER_TEMP/$engine.wasm\"\n sha256sum quickjs.wasm dist/index.js\n pnpm test --reporter=json --outputFile=\"$RUNNER_TEMP/$engine-suite.json\"\n ENGINE=\"$engine\" node --input-type=module <<'JS'\nimport assert from 'node:assert/strict';import {readFileSync}from'node:fs';const r=JSON.parse(readFileSync(process.env.RUNNER_TEMP+'/'+process.env.ENGINE+'-suite.json'));console.log('DEFERRED_SUITE',JSON.stringify({engine:process.env.ENGINE,passed:r.numPassedTests,failed:r.numFailedTests,files:r.testResults.length}));assert.equal(r.numFailedTests,0);assert.equal(r.numPassedTests,2075);\nJS\n if [ \"$engine\" = pinned ]; then\n  cp -R dist \"$RUNNER_TEMP/candidate-dist\"\n  git show bd88c9645948247ff5c3cfc7c10eeefc3b51f8c2:src/index.ts > src/index.ts\n  pnpm run build:ts\n  cp -R dist \"$RUNNER_TEMP/baseline-dist\"\n  set +e\n  pnpm test test/host-promise-lifecycle.test.ts --reporter=json --outputFile=\"$RUNNER_TEMP/red.json\"\n  result=$?\n  set -e\n  test \"$result\" = 1\n  node --input-type=module <<'JS'\nimport assert from 'node:assert/strict';import{readFileSync}from'node:fs';const r=JSON.parse(readFileSync(process.env.RUNNER_TEMP+'/red.json'));const bad=r.testResults.flatMap(x=>x.assertionResults).filter(x=>x.status==='failed');console.log('DEFERRED_RED',JSON.stringify({passed:r.numPassedTests,failed:r.numFailedTests,failures:bad.map(x=>({title:x.title,messages:x.failureMessages}))}));assert.equal(r.numFailedTests,14);assert.equal(r.numPassedTests,3);\nJS\n  git restore --source=HEAD src/index.ts\n fi\ndone\ngit diff --check\n"
+        }
+      ]
+    }
+  }
+}
