@@ -14,14 +14,14 @@
         {
           "uses": "actions/checkout@v4",
           "with": {
-            "ref": "2c02c2c1f64ab11132fbfabff3cdf4c7fcd2f5eb",
+            "ref": "7d33e583548e28cce1bc884e524f03d04911028b",
             "fetch-depth": 16
           }
         },
         {
           "name": "Release and parent failure controls",
           "shell": "bash",
-          "run": "set -euo pipefail\npython3 <<'CONTROL'\nfrom pathlib import Path\np=Path('api-test.c');s=p.read_text();s=s[:s.index('int main(void)')]+'int main(void) { for (int mode=0;mode<9;mode++) for(int room=-1;room<=0;room++){ fprintf(stderr,\"PHASE mode=%d room=%d\\\\n\",mode,room); int failed=generator_delivery_trial(mode,room); fprintf(stderr,\"RESULT mode=%d room=%d failed=%d\\\\n\",mode,room,failed); } generator_delivery_controls(); return 0; }\\n';p.write_text(s)\nCONTROL\ncmake -S . -B \"$RUNNER_TEMP/candidate\" -DCMAKE_BUILD_TYPE=Release\ncmake --build \"$RUNNER_TEMP/candidate\" --target api-test -j2\n\"$RUNNER_TEMP/candidate/api-test\"\n"
+          "run": "set -euo pipefail\npython3 <<'CONTROL'\nfrom pathlib import Path\np=Path('api-test.c');s=p.read_text();s=s[:s.index('int main(void)')]+'int main(int argc,char **argv) { if(argc>1){generator_delivery_controls(); return 0;} for (int mode=0;mode<9;mode++) for(int room=-1;room<=0;room++){ fprintf(stderr,\"PHASE mode=%d room=%d\\\\n\",mode,room); int failed=generator_delivery_trial(mode,room); fprintf(stderr,\"RESULT mode=%d room=%d failed=%d\\\\n\",mode,room,failed); } return 0; }\\n';p.write_text(s)\nCONTROL\ncmake -S . -B \"$RUNNER_TEMP/candidate\" -DCMAKE_BUILD_TYPE=Release\ncmake --build \"$RUNNER_TEMP/candidate\" --target api-test -j2\n\"$RUNNER_TEMP/candidate/api-test\"\n\nset +e\n\"$RUNNER_TEMP/candidate/api-test\" controls\nrc=$?\nset -e\necho CANDIDATE_CONTROLS_EXIT=$rc\ngit show fc8e21a7bfa76182639fbe4667864c6cf1c89499:quickjs.c > quickjs.c\ncmake -S . -B \"$RUNNER_TEMP/baseline\" -DCMAKE_BUILD_TYPE=Release\ncmake --build \"$RUNNER_TEMP/baseline\" --target api-test -j2\nset +e\n\"$RUNNER_TEMP/baseline/api-test\" controls\nrc=$?\nset -e\necho BASELINE_CONTROLS_EXIT=$rc\n"
         }
       ]
     }
